@@ -6,7 +6,9 @@
             "command": "/usr/bin/gcc",
             "args": [
                 "-g",
-                "${file}",
+                "/home/mathias/dev/projects/pico-editor/pico.c",
+                "/home/mathias/dev/projects/pico-editor/terminal.c",
+                "/home/mathias/dev/projects/pico-editor/stringbuffer.c",
                 "-o",
                 "${fileDirname}/${fileBasenameNoExtension}"
             ],
