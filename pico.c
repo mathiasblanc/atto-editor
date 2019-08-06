@@ -1,28 +1,52 @@
 #include <unistd.h>
 #include <termios.h>
 #include <stdlib.h>
-#include <ctype.h>
 #include <stdio.h>
 #include <errno.h>
-#include <sys/ioctl.h>
+#include <string.h>
 
-#include "pico.h"
 #include "stringbuffer.h"
+#include "terminal.h"
 
+#define PICO_VERSION "0.0.1"
+#define EDITOR_ROW_DECORATOR "~"
+#define EDITOR_ROW_DECORATOR_LEN 1
+#define ESC_CHAR '\x1b'
 #define CTRL_KEY(k) ((k)&0x1f)
 
-// @see https://viewsourcecode.org/snaptoken/kilo/03.rawInputAndOutput.html
+enum EditorKey
+{
+    ARROW_UP = 1000,
+    ARROW_DOWN,
+    ARROW_LEFT,
+    ARROW_RIGHT,
+    PAGE_UP,
+    PAGE_DOWN,
+    HOME_KEY,
+    END_KEY,
+    DEL_KEY
+};
 
 struct EditorConfig
 {
     struct termios origTermios;
     int screenRows;
     int screenCols;
+    int cursorX;
+    int cursorY;
 };
 
 struct EditorConfig editorConfig;
 
-void die(const char *message)
+static void initEditor();
+static int editorReadKey();
+static void editorRefreshScreen();
+static void editorProcessKeyPress();
+static void editorDrawRows(StringBuffer *sb);
+static void editorMoveCursor(int key);
+static void centerText(StringBuffer *sb, const char *text, int len);
+
+static void die(const char *message)
 {
     clearScreeen();
 
@@ -30,123 +54,51 @@ void die(const char *message)
     exit(1);
 }
 
-/* 
-* Reset terminal settings to their original values
-*/
-void disableRawMode()
+static void resetTerminal()
 {
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &editorConfig.origTermios) == -1)
-        die("tcsetattr");
+    if (disableRawMode(&editorConfig.origTermios) != 0)
+        die("disableRawMode");
 }
 
-/* 
-* Put terminal into raw mode : 
-* disable canonical mode -> input is read byte by byte instead of line by line
-* disable ctrl+* keys
-* disable OPOST (output processing) -> now requires explicit \r before \n
-*/
-void enableRawMode()
+static void centerText(StringBuffer *sb, const char *text, int len)
 {
-    if (tcgetattr(STDIN_FILENO, &editorConfig.origTermios) == -1)
-        die("tcgetattr");
+    if (len > editorConfig.screenCols)
+        len = editorConfig.screenCols;
 
-    atexit(disableRawMode);
+    int centerPadding = (editorConfig.screenCols - len) / 2;
 
-    struct termios raw = editorConfig.origTermios;
-    raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-    raw.c_oflag &= ~(OPOST);
-    raw.c_cflag |= (CS8);
-    raw.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
-    raw.c_cc[VMIN] = 0;
-    raw.c_cc[VTIME] = 1;
-
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
-        die("tcgetattr");
-}
-
-/*
-* Use ioctl with TIOCGWINSZ flag to retrieve the terminals number of rows and cols.
-* We use a fallback in case ioctl fails on some systems by moving the cursor to the bottom
-* right corner of the screen and retrieve the cursor position.
-*/
-int getWindowSize(int *rows, int *cols)
-{
-    struct winsize ws;
-
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0)
+    if (centerPadding > 0)
     {
-        // move cursor forward (C) and down (B) by 999 unit. C and B prevent
-        // the cursor from going past the screen edges.
-        if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12)
-            return -1;
+        sbAppend(sb, EDITOR_ROW_DECORATOR, EDITOR_ROW_DECORATOR_LEN);
 
-        return getCursorPosition(rows, cols);
-    }
-    else
-    {
-        *rows = ws.ws_row;
-        *cols = ws.ws_col;
+        while (--centerPadding)
+            sbAppend(sb, " ", 1);
     }
 
-    return 0;
+    sbAppend(sb, text, len);
 }
 
-/*
-* The 'n' command requests and reports the general status of the VT100. 
-* Parameter 6 reports the active position of the cursor.
-* The x and y coordinates are read from stdin in the form 27[30;211R
- */
-int getCursorPosition(int *rows, int *cols)
+static void editorDrawWelcome(StringBuffer *sb)
 {
-    if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4)
-        return -1;
+    const char *TITLE = "PICO editor";
+    centerText(sb, TITLE, strlen(TITLE));
+    sbAppend(sb, "\r\n", 2);
 
-    char buf[16];
-    unsigned int i = 0;
-
-    while (i < sizeof(buf))
-    {
-        if (read(STDIN_FILENO, &buf[i], 1) != 1)
-            break;
-
-        if (buf[i] == 'R')
-            break;
-
-        i++;
-    }
-
-    buf[i] = '\0';
-
-    if (buf[0] != '\x1b' || buf[1] != '[')
-        return -1;
-
-    if (sscanf(&buf[2], "%d;%d", rows, cols) != 2)
-        return -1;
-
-    return 0;
+    char version[40] = "version ";
+    strcat(version, PICO_VERSION);
+    centerText(sb, version, strlen(version));
 }
 
-/*
-* We use VT100 escape char 0x1b (27) followed by a [ and one or two more bytes 
-* depending on the sequence to clear part of the screen and move the cursor.
-
-* @See VT100 command set https://vt100.net/docs/vt100-ug/chapter3.html#ED
- */
-void clearScreeen()
+static void initEditor()
 {
-    // clear the screen
-    write(STDOUT_FILENO, "\x1b[2J", 4);
-    // reposition the cursor to the top left corner
-    write(STDOUT_FILENO, "\x1b[H", 3);
-}
+    editorConfig.cursorX = 0;
+    editorConfig.cursorY = 0;
 
-void initEditor()
-{
     if (getWindowSize(&editorConfig.screenRows, &editorConfig.screenCols) == -1)
         die("getWindowSize");
 }
 
-char editorReadKey()
+static int editorReadKey()
 {
     int nread;
     char c;
@@ -157,24 +109,99 @@ char editorReadKey()
             die("read");
     }
 
+    if (c == ESC_CHAR)
+    {
+        char seq[3];
+
+        if (read(STDIN_FILENO, &seq[0], 1) != 1)
+            return ESC_CHAR;
+        if (read(STDIN_FILENO, &seq[1], 1) != 1)
+            return ESC_CHAR;
+
+        if (seq[0] == '[')
+        {
+            if (seq[1] >= '0' && seq[1] <= '9')
+            {
+                if (read(STDIN_FILENO, &seq[2], 1) != 1)
+                    return ESC_CHAR;
+
+                if (seq[2] == '~')
+                {
+                    switch (seq[1])
+                    {
+                    case '1':
+                        return HOME_KEY;
+                    case '3':
+                        return DEL_KEY;
+                    case '4':
+                        return END_KEY;
+                    case '5':
+                        return PAGE_UP;
+                    case '6':
+                        return PAGE_DOWN;
+                    case '7':
+                        return HOME_KEY;
+                    case '8':
+                        return END_KEY;
+                    }
+                }
+            }
+            else
+            {
+                switch (seq[1])
+                {
+                case 'A':
+                    return ARROW_UP;
+                case 'B':
+                    return ARROW_DOWN;
+                case 'C':
+                    return ARROW_RIGHT;
+                case 'D':
+                    return ARROW_LEFT;
+                case 'H':
+                    return HOME_KEY;
+                case 'F':
+                    return END_KEY;
+                }
+            }
+        }
+        else if (seq[0] == 'O')
+        {
+            switch (seq[1])
+            {
+            case 'H':
+                return HOME_KEY;
+            case 'F':
+                return END_KEY;
+            }
+        }
+        else
+        {
+            return ESC_CHAR;
+        }
+    }
+
     return c;
 }
 
-void editorRefreshScreen()
+static void editorRefreshScreen()
 {
     StringBuffer sb = SB_INIT;
 
     clearScreeen();
     editorDrawRows(&sb);
-    sbAppend(&sb, "\x1b[H", 3);
+
+    char cursorBuf[32];
+    snprintf(cursorBuf, sizeof(cursorBuf), "\x1b[%d;%dH", editorConfig.cursorY + 1, editorConfig.cursorX + 1);
+    sbAppend(&sb, cursorBuf, strlen(cursorBuf));
 
     write(STDOUT_FILENO, sb.s, sb.len);
     sbFree(&sb);
 }
 
-void editorProcessKeyPress()
+static void editorProcessKeyPress()
 {
-    char c = editorReadKey();
+    int c = editorReadKey();
 
     switch (c)
     {
@@ -182,36 +209,30 @@ void editorProcessKeyPress()
         clearScreeen();
         exit(0);
         break;
+    case ARROW_UP:
+    case ARROW_DOWN:
+    case ARROW_LEFT:
+    case ARROW_RIGHT:
+    case PAGE_UP:
+    case PAGE_DOWN:
+    case HOME_KEY:
+    case END_KEY:
+        editorMoveCursor(c);
+        break;
     }
 }
 
-void editorDrawRows(StringBuffer *sb)
+static void editorDrawRows(StringBuffer *sb)
 {
     for (int i = 0; i < editorConfig.screenRows; i++)
     {
         if (i == editorConfig.screenRows / 3)
         {
-            char welcome[80];
-            int welcomeLen = snprintf(welcome, sizeof(welcome), "PICO editor -- version %s", PICO_VERSION);
-
-            if (welcomeLen > editorConfig.screenCols)
-                welcomeLen = editorConfig.screenCols;
-
-            int centerPadding = (editorConfig.screenCols - welcomeLen) / 2;
-
-            if (centerPadding)
-            {
-                sbAppend(sb, EDITOR_ROW_DECORATOR, EDITOR_ROW_DECORATOR_LEN);
-
-                while (--centerPadding)
-                    sbAppend(sb, " ", 1);
-            }
-
-            sbAppend(sb, welcome, welcomeLen);
+            editorDrawWelcome(sb);
         }
         else
         {
-            sbAppend(sb, "~", 1);
+            sbAppend(sb, EDITOR_ROW_DECORATOR, EDITOR_ROW_DECORATOR_LEN);
         }
 
         sbAppend(sb, "\x1b[K", 3);
@@ -221,9 +242,46 @@ void editorDrawRows(StringBuffer *sb)
     }
 }
 
+static void editorMoveCursor(int key)
+{
+    switch (key)
+    {
+    case ARROW_LEFT:
+        if (editorConfig.cursorX > 0)
+            editorConfig.cursorX--;
+        break;
+    case ARROW_DOWN:
+        if (editorConfig.cursorY < editorConfig.screenRows)
+            editorConfig.cursorY++;
+        break;
+    case ARROW_RIGHT:
+        if (editorConfig.cursorX < editorConfig.screenCols)
+            editorConfig.cursorX++;
+        break;
+    case ARROW_UP:
+        if (editorConfig.cursorY > 0)
+            editorConfig.cursorY--;
+        break;
+    case PAGE_UP:
+    case PAGE_DOWN:
+        for (int i = 0; i < editorConfig.screenRows; i++)
+            editorMoveCursor(key == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+        break;
+    case HOME_KEY:
+        editorConfig.cursorX = 0;
+        break;
+    case END_KEY:
+        editorConfig.cursorX = editorConfig.screenCols - 1;
+        break;
+    }
+}
+
 int main()
 {
-    enableRawMode();
+    if (enableRawMode(&editorConfig.origTermios) != 0)
+        die("enableRawMode");
+
+    atexit(resetTerminal);
     initEditor();
 
     while (1)
