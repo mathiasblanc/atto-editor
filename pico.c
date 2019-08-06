@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
+#include <sys/types.h>
 
 #include "stringbuffer.h"
 #include "terminal.h"
@@ -27,16 +28,24 @@ enum EditorKey
     DEL_KEY
 };
 
-struct EditorConfig
+typedef struct TextRow
+{
+    int len;
+    char *text;
+} TextRow;
+
+typedef struct EditorConfig
 {
     struct termios origTermios;
     int screenRows;
     int screenCols;
     int cursorX;
     int cursorY;
-};
+    int numRows;
+    TextRow textRow;
+} EditorConfig;
 
-struct EditorConfig editorConfig;
+EditorConfig config;
 
 static void initEditor();
 static int editorReadKey();
@@ -45,6 +54,7 @@ static void editorProcessKeyPress();
 static void editorDrawRows(StringBuffer *sb);
 static void editorMoveCursor(int key);
 static void centerText(StringBuffer *sb, const char *text, int len);
+static void editorOpen();
 
 static void die(const char *message)
 {
@@ -56,16 +66,16 @@ static void die(const char *message)
 
 static void resetTerminal()
 {
-    if (disableRawMode(&editorConfig.origTermios) != 0)
+    if (disableRawMode(&config.origTermios) != 0)
         die("disableRawMode");
 }
 
 static void centerText(StringBuffer *sb, const char *text, int len)
 {
-    if (len > editorConfig.screenCols)
-        len = editorConfig.screenCols;
+    if (len > config.screenCols)
+        len = config.screenCols;
 
-    int centerPadding = (editorConfig.screenCols - len) / 2;
+    int centerPadding = (config.screenCols - len) / 2;
 
     if (centerPadding > 0)
     {
@@ -91,10 +101,11 @@ static void editorDrawWelcome(StringBuffer *sb)
 
 static void initEditor()
 {
-    editorConfig.cursorX = 0;
-    editorConfig.cursorY = 0;
+    config.cursorX = 0;
+    config.cursorY = 0;
+    config.numRows = 0;
 
-    if (getWindowSize(&editorConfig.screenRows, &editorConfig.screenCols) == -1)
+    if (getWindowSize(&config.screenRows, &config.screenCols) == -1)
         die("getWindowSize");
 }
 
@@ -192,7 +203,7 @@ static void editorRefreshScreen()
     editorDrawRows(&sb);
 
     char cursorBuf[32];
-    snprintf(cursorBuf, sizeof(cursorBuf), "\x1b[%d;%dH", editorConfig.cursorY + 1, editorConfig.cursorX + 1);
+    snprintf(cursorBuf, sizeof(cursorBuf), "\x1b[%d;%dH", config.cursorY + 1, config.cursorX + 1);
     sbAppend(&sb, cursorBuf, strlen(cursorBuf));
 
     write(STDOUT_FILENO, sb.s, sb.len);
@@ -222,11 +233,23 @@ static void editorProcessKeyPress()
     }
 }
 
+static void editorOpen()
+{
+    char *line = "Hello World";
+    ssize_t len = strlen(line);
+
+    config.textRow.len = len;
+    config.textRow.text = malloc(len + 1);
+    strcpy(config.textRow.text, line);
+    config.textRow.text[len] = '\0';
+    config.numRows = 1;
+}
+
 static void editorDrawRows(StringBuffer *sb)
 {
-    for (int i = 0; i < editorConfig.screenRows; i++)
+    for (int i = 0; i < config.screenRows; i++)
     {
-        if (i == editorConfig.screenRows / 3)
+        if (i == config.screenRows / 3)
         {
             editorDrawWelcome(sb);
         }
@@ -237,7 +260,7 @@ static void editorDrawRows(StringBuffer *sb)
 
         sbAppend(sb, "\x1b[K", 3);
 
-        if (i < editorConfig.screenRows - 1)
+        if (i < config.screenRows - 1)
             sbAppend(sb, "\r\n", 2);
     }
 }
@@ -247,42 +270,43 @@ static void editorMoveCursor(int key)
     switch (key)
     {
     case ARROW_LEFT:
-        if (editorConfig.cursorX > 0)
-            editorConfig.cursorX--;
+        if (config.cursorX > 0)
+            config.cursorX--;
         break;
     case ARROW_DOWN:
-        if (editorConfig.cursorY < editorConfig.screenRows)
-            editorConfig.cursorY++;
+        if (config.cursorY < config.screenRows)
+            config.cursorY++;
         break;
     case ARROW_RIGHT:
-        if (editorConfig.cursorX < editorConfig.screenCols)
-            editorConfig.cursorX++;
+        if (config.cursorX < config.screenCols)
+            config.cursorX++;
         break;
     case ARROW_UP:
-        if (editorConfig.cursorY > 0)
-            editorConfig.cursorY--;
+        if (config.cursorY > 0)
+            config.cursorY--;
         break;
     case PAGE_UP:
     case PAGE_DOWN:
-        for (int i = 0; i < editorConfig.screenRows; i++)
+        for (int i = 0; i < config.screenRows; i++)
             editorMoveCursor(key == PAGE_UP ? ARROW_UP : ARROW_DOWN);
         break;
     case HOME_KEY:
-        editorConfig.cursorX = 0;
+        config.cursorX = 0;
         break;
     case END_KEY:
-        editorConfig.cursorX = editorConfig.screenCols - 1;
+        config.cursorX = config.screenCols - 1;
         break;
     }
 }
 
 int main()
 {
-    if (enableRawMode(&editorConfig.origTermios) != 0)
+    if (enableRawMode(&config.origTermios) != 0)
         die("enableRawMode");
 
     atexit(resetTerminal);
     initEditor();
+    editorOpen();
 
     while (1)
     {
