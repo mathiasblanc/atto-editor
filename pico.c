@@ -43,6 +43,7 @@ typedef struct Document
     int numRows;
     TextRow *rows;
     int rowOffset;
+    int colOffset;
 } Document;
 
 typedef struct EditorConfig
@@ -123,6 +124,7 @@ static void initEditor()
     document.numRows = 0;
     document.rows = NULL;
     document.rowOffset = 0;
+    document.colOffset = 0;
 }
 
 static int editorReadKey()
@@ -213,6 +215,12 @@ static int editorReadKey()
 
 static void editorScroll()
 {
+    if (config.cursorX < document.colOffset)
+        document.colOffset = config.cursorX;
+
+    if (config.cursorX >= document.colOffset + config.screenCols)
+        document.colOffset = config.cursorX - config.screenCols + 1;
+
     if (config.cursorY < document.rowOffset)
         document.rowOffset = config.cursorY;
 
@@ -230,9 +238,11 @@ static void editorRefreshScreen()
     editorDrawRows(&sb);
 
     char cursorBuf[32];
-    snprintf(cursorBuf, sizeof(cursorBuf), "\x1b[%d;%dH", (config.cursorY - document.rowOffset) + 1, config.cursorX + 1);
-    sbAppend(&sb, cursorBuf, strlen(cursorBuf));
+    snprintf(cursorBuf, sizeof(cursorBuf), "\x1b[%d;%dH",
+             (config.cursorY - document.rowOffset) + 1,
+             (config.cursorX - document.colOffset) + 1);
 
+    sbAppend(&sb, cursorBuf, strlen(cursorBuf));
     write(STDOUT_FILENO, sb.s, sb.len);
     sbFree(&sb);
 }
@@ -310,12 +320,15 @@ static void editorDrawRows(StringBuffer *sb)
         }
         else
         {
-            int len = document.rows[documentRow].len;
+            int len = document.rows[documentRow].len - document.colOffset;
+
+            if (len < 0)
+                len = 0;
 
             if (len >= config.screenCols)
                 len = config.screenCols;
 
-            sbAppend(sb, document.rows[documentRow].text, len);
+            sbAppend(sb, &document.rows[documentRow].text[document.colOffset], len);
         }
 
         // erase all char from active position to the end of the screen
@@ -328,19 +341,36 @@ static void editorDrawRows(StringBuffer *sb)
 
 static void editorMoveCursor(int key)
 {
+    TextRow *row = config.cursorY >= document.numRows ? NULL : &document.rows[config.cursorY];
+
     switch (key)
     {
     case ARROW_LEFT:
         if (config.cursorX > 0)
+        {
             config.cursorX--;
+        }
+        else if (config.cursorY > 0)
+        {
+            config.cursorY--;
+            config.cursorX = document.rows[config.cursorY].len;
+        }
         break;
     case ARROW_DOWN:
         if (config.cursorY < document.numRows)
             config.cursorY++;
         break;
     case ARROW_RIGHT:
-        if (config.cursorX < config.screenCols)
+        if (row && config.cursorX < row->len)
+        {
             config.cursorX++;
+        }
+        else if (row && config.cursorX == row->len)
+        {
+            config.cursorY++;
+            config.cursorX = 0;
+        }
+
         break;
     case ARROW_UP:
         if (config.cursorY > 0)
@@ -358,6 +388,13 @@ static void editorMoveCursor(int key)
         config.cursorX = config.screenCols - 1;
         break;
     }
+
+    // reset cursor to the end of a line when going far right and down to a shorter line
+    row = config.cursorY >= document.numRows ? NULL : &document.rows[config.cursorY];
+    int rowLen = row ? row->len : 0;
+
+    if (config.cursorX > rowLen)
+        config.cursorX = rowLen;
 }
 
 int main(int argc, char *argv[])
