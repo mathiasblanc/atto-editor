@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/types.h>
+#include <time.h>
 
 #include "stringbuffer.h"
 #include "terminal.h"
@@ -18,6 +19,7 @@
 #define EDITOR_ROW_DECORATOR_LEN 1
 #define ESC_CHAR '\x1b'
 #define CTRL_KEY(k) ((k)&0x1f)
+#define TAB_STOP 8
 
 enum EditorKey
 {
@@ -36,6 +38,8 @@ typedef struct TextRow
 {
     int len;
     char *text;
+    int renderLen;
+    char *render;
 } TextRow;
 
 typedef struct Document
@@ -44,6 +48,7 @@ typedef struct Document
     TextRow *rows;
     int rowOffset;
     int colOffset;
+    char *filename;
 } Document;
 
 typedef struct EditorConfig
@@ -53,6 +58,7 @@ typedef struct EditorConfig
     int screenCols;
     int cursorX;
     int cursorY;
+    int cursorRenderX;
 } EditorConfig;
 
 EditorConfig config;
@@ -63,12 +69,15 @@ static void die(const char *message);
 static void initEditor();
 static void editorRefreshScreen();
 static void editorProcessKeyPress();
+static void editorUpdateRow(TextRow *row);
 static void editorDrawRows(StringBuffer *sb);
 static void editorMoveCursor(int key);
 static void centerText(StringBuffer *sb, const char *text, int len);
 static void editorOpen(const char *filename);
 static void editorAppendRow(const char *s, size_t len);
 static void editorScroll();
+static int editorCursorXToCursorRenderX(const TextRow *row, int cursorX);
+static void editorDrawStatusBar(StringBuffer *sb);
 
 static void die(const char *message)
 {
@@ -102,6 +111,39 @@ static void centerText(StringBuffer *sb, const char *text, int len)
     sbAppend(sb, text, len);
 }
 
+static void editorDrawStatusBar(StringBuffer *sb)
+{
+    sbAppend(sb, "\x1b[7m", 4);
+
+    char status[80];
+    int len = snprintf(status, sizeof(status), "%.20s - %d lines",
+                       document.filename ? document.filename : "[NO NAME]", document.numRows);
+
+    char rStatus[80];
+    int rLen = snprintf(rStatus, sizeof(rStatus), "%d/%d", config.cursorY + 1, document.numRows);
+
+    if (len > config.screenCols)
+        len = config.screenCols;
+
+    sbAppend(sb, status, len);
+
+    while (len < config.screenCols)
+    {
+        if (config.screenCols - len == rLen)
+        {
+            sbAppend(sb, rStatus, rLen);
+            break;
+        }
+        else
+        {
+            sbAppend(sb, " ", 1);
+            len++;
+        }
+    }
+
+    sbAppend(sb, "\x1b[m", 3);
+}
+
 static void editorDrawWelcome(StringBuffer *sb)
 {
     const char *TITLE = "PICO editor";
@@ -117,14 +159,19 @@ static void initEditor()
 {
     config.cursorX = 0;
     config.cursorY = 0;
+    config.cursorRenderX = 0;
 
     if (getWindowSize(&config.screenRows, &config.screenCols) == -1)
         die("getWindowSize");
+
+    //keep room for a status bar
+    config.screenRows--;
 
     document.numRows = 0;
     document.rows = NULL;
     document.rowOffset = 0;
     document.colOffset = 0;
+    document.filename = NULL;
 }
 
 static int editorReadKey()
@@ -215,17 +262,38 @@ static int editorReadKey()
 
 static void editorScroll()
 {
-    if (config.cursorX < document.colOffset)
-        document.colOffset = config.cursorX;
+    config.cursorRenderX = 0;
 
-    if (config.cursorX >= document.colOffset + config.screenCols)
-        document.colOffset = config.cursorX - config.screenCols + 1;
+    if (config.cursorY < document.numRows)
+        config.cursorRenderX = editorCursorXToCursorRenderX(
+            &document.rows[config.cursorY], config.cursorX);
+
+    if (config.cursorRenderX < document.colOffset)
+        document.colOffset = config.cursorRenderX;
+
+    if (config.cursorRenderX >= document.colOffset + config.screenCols)
+        document.colOffset = config.cursorRenderX - config.screenCols + 1;
 
     if (config.cursorY < document.rowOffset)
         document.rowOffset = config.cursorY;
 
     if (config.cursorY >= document.rowOffset + config.screenRows)
         document.rowOffset = config.cursorY - config.screenRows + 1;
+}
+
+static int editorCursorXToCursorRenderX(const TextRow *row, int cursorX)
+{
+    int cursorRenderX = 0;
+
+    for (int i = 0; i < cursorX; i++)
+    {
+        if (row->text[i] == '\t')
+            cursorRenderX += (TAB_STOP - 1) - (cursorRenderX % TAB_STOP);
+
+        cursorRenderX++;
+    }
+
+    return cursorRenderX;
 }
 
 static void editorRefreshScreen()
@@ -236,11 +304,12 @@ static void editorRefreshScreen()
 
     clearScreeen();
     editorDrawRows(&sb);
+    editorDrawStatusBar(&sb);
 
     char cursorBuf[32];
     snprintf(cursorBuf, sizeof(cursorBuf), "\x1b[%d;%dH",
              (config.cursorY - document.rowOffset) + 1,
-             (config.cursorX - document.colOffset) + 1);
+             (config.cursorRenderX - document.colOffset) + 1);
 
     sbAppend(&sb, cursorBuf, strlen(cursorBuf));
     write(STDOUT_FILENO, sb.s, sb.len);
@@ -270,6 +339,38 @@ static void editorProcessKeyPress()
     }
 }
 
+static void editorUpdateRow(TextRow *row)
+{
+    int tabs = 0;
+    for (int i = 0; i < row->len; i++)
+        if (row->text[i] == '\t')
+            tabs++;
+
+    free(row->render);
+    //TAB_STOP - 1 because \t already counts for 1
+    row->render = malloc(row->len + 1 + tabs * (TAB_STOP - 1));
+
+    int pos = 0;
+
+    for (int i = 0; i < row->len; i++)
+    {
+        if (row->text[i] == '\t')
+        {
+            row->render[pos++] = ' ';
+
+            while (pos % TAB_STOP != 0)
+                row->render[pos++] = ' ';
+        }
+        else
+        {
+            row->render[pos++] = row->text[i];
+        }
+    }
+
+    row->render[pos] = '\0';
+    row->renderLen = pos;
+}
+
 static void editorAppendRow(const char *s, size_t len)
 {
     document.rows = realloc(document.rows, sizeof(TextRow) * (document.numRows + 1));
@@ -279,11 +380,19 @@ static void editorAppendRow(const char *s, size_t len)
     document.rows[at].text = malloc(len + 1);
     memcpy(document.rows[at].text, s, len);
     document.rows[at].text[len] = '\0';
+
+    document.rows[at].renderLen = 0;
+    document.rows[at].render = NULL;
+    editorUpdateRow(&document.rows[at]);
+
     document.numRows++;
 }
 
 static void editorOpen(const char *filename)
 {
+    free(document.filename);
+    document.filename = strdup(filename);
+
     FILE *fp = fopen(filename, "r");
 
     if (!fp)
@@ -320,7 +429,7 @@ static void editorDrawRows(StringBuffer *sb)
         }
         else
         {
-            int len = document.rows[documentRow].len - document.colOffset;
+            int len = document.rows[documentRow].renderLen - document.colOffset;
 
             if (len < 0)
                 len = 0;
@@ -328,14 +437,13 @@ static void editorDrawRows(StringBuffer *sb)
             if (len >= config.screenCols)
                 len = config.screenCols;
 
-            sbAppend(sb, &document.rows[documentRow].text[document.colOffset], len);
+            sbAppend(sb, &document.rows[documentRow].render[document.colOffset], len);
         }
 
         // erase all char from active position to the end of the screen
         sbAppend(sb, "\x1b[K", 3);
 
-        if (i < config.screenRows - 1)
-            sbAppend(sb, "\r\n", 2);
+        sbAppend(sb, "\r\n", 2);
     }
 }
 
@@ -378,6 +486,18 @@ static void editorMoveCursor(int key)
         break;
     case PAGE_UP:
     case PAGE_DOWN:
+        if (key == PAGE_UP)
+        {
+            config.cursorY = document.rowOffset;
+        }
+        else if (key == PAGE_DOWN)
+        {
+            config.cursorY = document.rowOffset + config.screenRows - 1;
+
+            if (config.cursorY > document.numRows)
+                config.cursorY = document.numRows;
+        }
+
         for (int i = 0; i < config.screenRows; i++)
             editorMoveCursor(key == PAGE_UP ? ARROW_UP : ARROW_DOWN);
         break;
