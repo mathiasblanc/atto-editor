@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <stdarg.h>
+#include <fcntl.h>
 
 #include "stringbuffer.h"
 #include "terminal.h"
@@ -24,6 +25,7 @@
 
 enum EditorKey
 {
+    BACKSPACE = 127,
     ARROW_UP = 1000,
     ARROW_DOWN,
     ARROW_LEFT,
@@ -45,7 +47,7 @@ typedef struct TextRow
 
 typedef struct Document
 {
-    int numRows;
+    int rowsCount;
     TextRow *rows;
     int rowOffset;
     int colOffset;
@@ -83,6 +85,10 @@ static int editorCursorXToCursorRenderX(const TextRow *row, int cursorX);
 static void editorDrawStatusBar(StringBuffer *sb);
 static void editorDrawMessageBar(StringBuffer *sb);
 static void editorSetStatusMessage(const char *fmt, ...);
+static void editorInsertCharAtRow(const char c, int at, TextRow *row);
+static void editorInsertChar(const char c);
+static char *editorRowsToString(int *bufferLen);
+static void editorSave();
 
 static void die(const char *message)
 {
@@ -144,10 +150,10 @@ static void editorDrawStatusBar(StringBuffer *sb)
 
     char status[80];
     int len = snprintf(status, sizeof(status), "%.20s - %d lines",
-                       document.filename ? document.filename : "[NO NAME]", document.numRows);
+                       document.filename ? document.filename : "[NO NAME]", document.rowsCount);
 
     char rStatus[80];
-    int rLen = snprintf(rStatus, sizeof(rStatus), "%d/%d", config.cursorY + 1, document.numRows);
+    int rLen = snprintf(rStatus, sizeof(rStatus), "%d/%d", config.cursorY + 1, document.rowsCount);
 
     if (len > config.screenCols)
         len = config.screenCols;
@@ -197,7 +203,7 @@ static void initEditor()
     //keep room for a status bar and a status message
     config.screenRows -= 2;
 
-    document.numRows = 0;
+    document.rowsCount = 0;
     document.rows = NULL;
     document.rowOffset = 0;
     document.colOffset = 0;
@@ -294,7 +300,7 @@ static void editorScroll()
 {
     config.cursorRenderX = 0;
 
-    if (config.cursorY < document.numRows)
+    if (config.cursorY < document.rowsCount)
         config.cursorRenderX = editorCursorXToCursorRenderX(
             &document.rows[config.cursorY], config.cursorX);
 
@@ -347,27 +353,17 @@ static void editorRefreshScreen()
     sbFree(&sb);
 }
 
-static void editorProcessKeyPress()
+static void editorInsertCharAtRow(const char c, int at, TextRow *row)
 {
-    int c = editorReadKey();
+    if (at < 0 || at > row->len)
+        at = row->len;
 
-    switch (c)
-    {
-    case CTRL_KEY('q'):
-        clearScreeen();
-        exit(0);
-        break;
-    case ARROW_UP:
-    case ARROW_DOWN:
-    case ARROW_LEFT:
-    case ARROW_RIGHT:
-    case PAGE_UP:
-    case PAGE_DOWN:
-    case HOME_KEY:
-    case END_KEY:
-        editorMoveCursor(c);
-        break;
-    }
+    row->text = realloc(row->text, row->len + 2);
+    memmove(&row->text[at + 1], &row->text[at], row->len - at + 1);
+    row->len++;
+    row->text[at] = c;
+
+    editorUpdateRow(row);
 }
 
 static void editorUpdateRow(TextRow *row)
@@ -404,8 +400,8 @@ static void editorUpdateRow(TextRow *row)
 
 static void editorAppendRow(const char *s, size_t len)
 {
-    document.rows = realloc(document.rows, sizeof(TextRow) * (document.numRows + 1));
-    const int at = document.numRows;
+    document.rows = realloc(document.rows, sizeof(TextRow) * (document.rowsCount + 1));
+    const int at = document.rowsCount;
 
     document.rows[at].len = len;
     document.rows[at].text = malloc(len + 1);
@@ -416,7 +412,65 @@ static void editorAppendRow(const char *s, size_t len)
     document.rows[at].render = NULL;
     editorUpdateRow(&document.rows[at]);
 
-    document.numRows++;
+    document.rowsCount++;
+}
+
+// caller is responsible for freeing the returned buffer
+static char *editorRowsToString(int *bufferLen)
+{
+    int totLen = 0;
+
+    for (int i = 0; i < document.rowsCount; i++)
+        totLen += document.rows[i].len + 1;
+
+    *bufferLen = totLen;
+
+    char *buffer = malloc(totLen);
+    char *endLine = buffer;
+
+    for (int i = 0; i < document.rowsCount; i++)
+    {
+        memcpy(endLine, document.rows[i].text, document.rows[i].len);
+        endLine += document.rows[i].len;
+        *endLine = '\n';
+        endLine++;
+    }
+
+    return buffer;
+}
+
+/*
+* Improve by saving to a temporary file and renaming it 
+* if the whole process succeeded without error
+*/
+static void editorSave()
+{
+    if (document.filename == NULL)
+        return;
+
+    int len;
+    char *buffer = editorRowsToString(&len);
+
+    int fd = open(document.filename, O_RDWR | O_CREAT, 0644);
+
+    if (fd != -1)
+    {
+        if (ftruncate(fd, len) != -1)
+        {
+            if (write(fd, buffer, len) == len)
+            {
+                close(fd);
+                free(buffer);
+                editorSetStatusMessage("%d bytes written to disk", len);
+                return;
+            }
+        }
+
+        close(fd);
+    }
+
+    free(buffer);
+    editorSetStatusMessage("File NOT save! I/O error: %s", strerror(errno));
 }
 
 static void editorOpen(const char *filename)
@@ -451,9 +505,9 @@ static void editorDrawRows(StringBuffer *sb)
     {
         int documentRow = document.rowOffset + i;
 
-        if (documentRow >= document.numRows)
+        if (documentRow >= document.rowsCount)
         {
-            if (document.numRows == 0 && i == config.screenRows / 3)
+            if (document.rowsCount == 0 && i == config.screenRows / 3)
                 editorDrawWelcome(sb);
             else
                 sbAppend(sb, EDITOR_ROW_DECORATOR, EDITOR_ROW_DECORATOR_LEN);
@@ -478,9 +532,18 @@ static void editorDrawRows(StringBuffer *sb)
     }
 }
 
+static void editorInsertChar(const char c)
+{
+    if (config.cursorY == document.rowsCount)
+        editorAppendRow("", 0);
+
+    editorInsertCharAtRow(c, config.cursorX, &document.rows[config.cursorY]);
+    config.cursorX++;
+}
+
 static void editorMoveCursor(int key)
 {
-    TextRow *row = config.cursorY >= document.numRows ? NULL : &document.rows[config.cursorY];
+    TextRow *row = config.cursorY >= document.rowsCount ? NULL : &document.rows[config.cursorY];
 
     switch (key)
     {
@@ -496,7 +559,7 @@ static void editorMoveCursor(int key)
         }
         break;
     case ARROW_DOWN:
-        if (config.cursorY < document.numRows)
+        if (config.cursorY < document.rowsCount)
             config.cursorY++;
         break;
     case ARROW_RIGHT:
@@ -525,8 +588,8 @@ static void editorMoveCursor(int key)
         {
             config.cursorY = document.rowOffset + config.screenRows - 1;
 
-            if (config.cursorY > document.numRows)
-                config.cursorY = document.numRows;
+            if (config.cursorY > document.rowsCount)
+                config.cursorY = document.rowsCount;
         }
 
         for (int i = 0; i < config.screenRows; i++)
@@ -541,11 +604,51 @@ static void editorMoveCursor(int key)
     }
 
     // reset cursor to the end of a line when going far right and down to a shorter line
-    row = config.cursorY >= document.numRows ? NULL : &document.rows[config.cursorY];
+    row = config.cursorY >= document.rowsCount ? NULL : &document.rows[config.cursorY];
     int rowLen = row ? row->len : 0;
 
     if (config.cursorX > rowLen)
         config.cursorX = rowLen;
+}
+
+static void editorProcessKeyPress()
+{
+    int c = editorReadKey();
+
+    switch (c)
+    {
+    case '\r':
+        // TODO
+        break;
+    case CTRL_KEY('q'):
+        clearScreeen();
+        exit(0);
+        break;
+    case BACKSPACE:
+    case CTRL_KEY('h'):
+    case DEL_KEY:
+        // TODO
+        break;
+    case CTRL_KEY('s'):
+        editorSave();
+        break;
+    case ARROW_UP:
+    case ARROW_DOWN:
+    case ARROW_LEFT:
+    case ARROW_RIGHT:
+    case PAGE_UP:
+    case PAGE_DOWN:
+    case HOME_KEY:
+    case END_KEY:
+        editorMoveCursor(c);
+        break;
+    case CTRL_KEY('l'):
+    case ESC_CHAR:
+        break;
+    default:
+        editorInsertChar(c);
+        break;
+    }
 }
 
 int main(int argc, char *argv[])
@@ -559,7 +662,7 @@ int main(int argc, char *argv[])
     if (argc >= 2)
         editorOpen(argv[1]);
 
-    editorSetStatusMessage("HELP : Ctrl+Q = quit");
+    editorSetStatusMessage("HELP : Ctrl+S = save | Ctrl+Q = quit");
 
     while (1)
     {
