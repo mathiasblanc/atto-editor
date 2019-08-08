@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <time.h>
+#include <stdarg.h>
 
 #include "stringbuffer.h"
 #include "terminal.h"
@@ -59,6 +60,8 @@ typedef struct EditorConfig
     int cursorX;
     int cursorY;
     int cursorRenderX;
+    char statusMessage[80];
+    time_t statusMessageTime;
 } EditorConfig;
 
 EditorConfig config;
@@ -78,6 +81,8 @@ static void editorAppendRow(const char *s, size_t len);
 static void editorScroll();
 static int editorCursorXToCursorRenderX(const TextRow *row, int cursorX);
 static void editorDrawStatusBar(StringBuffer *sb);
+static void editorDrawMessageBar(StringBuffer *sb);
+static void editorSetStatusMessage(const char *fmt, ...);
 
 static void die(const char *message)
 {
@@ -111,6 +116,28 @@ static void centerText(StringBuffer *sb, const char *text, int len)
     sbAppend(sb, text, len);
 }
 
+static void editorSetStatusMessage(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(config.statusMessage, sizeof(config.statusMessage), fmt, ap);
+    va_end(ap);
+    config.statusMessageTime = time(NULL);
+}
+
+static void editorDrawMessageBar(StringBuffer *sb)
+{
+    sbAppend(sb, "\x1b[K", 3);
+
+    int len = strlen(config.statusMessage);
+
+    if (len > config.screenCols)
+        len = config.screenCols;
+
+    if (len && time(NULL) - config.statusMessageTime < 5)
+        sbAppend(sb, config.statusMessage, len);
+}
+
 static void editorDrawStatusBar(StringBuffer *sb)
 {
     sbAppend(sb, "\x1b[7m", 4);
@@ -142,6 +169,7 @@ static void editorDrawStatusBar(StringBuffer *sb)
     }
 
     sbAppend(sb, "\x1b[m", 3);
+    sbAppend(sb, "\r\n", 2);
 }
 
 static void editorDrawWelcome(StringBuffer *sb)
@@ -160,12 +188,14 @@ static void initEditor()
     config.cursorX = 0;
     config.cursorY = 0;
     config.cursorRenderX = 0;
+    config.statusMessage[0] = '\0';
+    config.statusMessageTime = 0;
 
     if (getWindowSize(&config.screenRows, &config.screenCols) == -1)
         die("getWindowSize");
 
-    //keep room for a status bar
-    config.screenRows--;
+    //keep room for a status bar and a status message
+    config.screenRows -= 2;
 
     document.numRows = 0;
     document.rows = NULL;
@@ -305,6 +335,7 @@ static void editorRefreshScreen()
     clearScreeen();
     editorDrawRows(&sb);
     editorDrawStatusBar(&sb);
+    editorDrawMessageBar(&sb);
 
     char cursorBuf[32];
     snprintf(cursorBuf, sizeof(cursorBuf), "\x1b[%d;%dH",
@@ -527,6 +558,8 @@ int main(int argc, char *argv[])
 
     if (argc >= 2)
         editorOpen(argv[1]);
+
+    editorSetStatusMessage("HELP : Ctrl+Q = quit");
 
     while (1)
     {
