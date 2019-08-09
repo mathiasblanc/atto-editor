@@ -81,7 +81,7 @@ static void editorDrawRows(StringBuffer *sb);
 static void editorMoveCursor(int key);
 static void centerText(StringBuffer *sb, const char *text, int len);
 static void editorOpen(const char *filename);
-static void editorAppendRow(const char *s, size_t len);
+static void editorInsertRow(const int at, const char *s, size_t len);
 static void editorScroll();
 static int editorCursorXToCursorRenderX(const TextRow *row, int cursorX);
 static void editorDrawStatusBar(StringBuffer *sb);
@@ -96,6 +96,7 @@ static void editorDelChar();
 static void editorFreeRow(TextRow *row);
 static void editorDelRow(const int at);
 static void editorAppendStringToRow(const char *s, const size_t len, TextRow *row);
+static void editorInsertNewLine();
 
 static void die(const char *message)
 {
@@ -476,10 +477,33 @@ static void editorUpdateRow(TextRow *row)
     row->renderLen = pos;
 }
 
-static void editorAppendRow(const char *s, size_t len)
+static void editorInsertNewLine()
 {
+    if (config.cursorX == 0)
+    {
+        editorInsertRow(config.cursorY, "", 0);
+    }
+    else
+    {
+        TextRow *row = &document.rows[config.cursorY];
+        editorInsertRow(config.cursorY + 1, &row->text[config.cursorX], row->len - config.cursorX);
+        row = &document.rows[config.cursorY];
+        row->len = config.cursorX;
+        row->text[row->len] = '\0';
+        editorUpdateRow(row);
+    }
+
+    config.cursorX = 0;
+    config.cursorY++;
+}
+
+static void editorInsertRow(const int at, const char *s, size_t len)
+{
+    if (at < 0 || at > document.rowsCount)
+        return;
+
     document.rows = realloc(document.rows, sizeof(TextRow) * (document.rowsCount + 1));
-    const int at = document.rowsCount;
+    memmove(&document.rows[at + 1], &document.rows[at], sizeof(TextRow) * (document.rowsCount - at));
 
     document.rows[at].len = len;
     document.rows[at].text = malloc(len + 1);
@@ -574,7 +598,7 @@ static void editorOpen(const char *filename)
         while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == '\n'))
             len--;
 
-        editorAppendRow(line, len);
+        editorInsertRow(document.rowsCount, line, len);
     }
 
     free(line);
@@ -618,7 +642,7 @@ static void editorDrawRows(StringBuffer *sb)
 static void editorInsertChar(const char c)
 {
     if (config.cursorY == document.rowsCount)
-        editorAppendRow("", 0);
+        editorInsertRow(document.rowsCount, "", 0);
 
     editorInsertCharAtRow(c, config.cursorX, &document.rows[config.cursorY]);
     config.cursorX++;
@@ -702,12 +726,12 @@ static void editorProcessKeyPress()
     switch (c)
     {
     case '\r':
-        // TODO
+        editorInsertNewLine();
         break;
     case CTRL_KEY('q'):
         if (document.dirty && quitTimes > 0)
         {
-            editorSetStatusMessage("WARNING!!! File has unsaved changes. "
+            editorSetStatusMessage("\x1b[1;5mWARNING\x1b[m File has unsaved changes. "
                                    "Press Ctrl+Q %d more times to quit.",
                                    quitTimes);
             quitTimes--;
