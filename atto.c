@@ -552,7 +552,7 @@ static void editorSave()
 {
     if (document.filename == NULL)
     {
-        document.filename = editorPrompt("Save as : %s");
+        document.filename = editorPrompt("Save as : %s (ESC to cancel)");
 
         if (document.filename == NULL)
         {
@@ -742,7 +742,7 @@ static void editorProcessKeyPress()
         if (document.dirty && quitTimes > 0)
         {
             editorSetStatusMessage("\x1b[1;5m(!)\x1b[m File has unsaved changes. "
-                                   "Press Ctrl+Q %d more times to quit.",
+                                   "Press Ctrl+Q \x1b[1m%d\x1b[m more times to quit.",
                                    quitTimes);
             quitTimes--;
             return;
