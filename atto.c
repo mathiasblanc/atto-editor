@@ -16,7 +16,7 @@
 #include "stringbuffer.h"
 #include "terminal.h"
 
-#define PICO_VERSION "0.0.1"
+#define ATTO_VERSION "0.0.1"
 #define EDITOR_ROW_DECORATOR "~"
 #define EDITOR_ROW_DECORATOR_LEN 1
 #define ESC_CHAR '\x1b'
@@ -189,12 +189,12 @@ static void editorDrawStatusBar(StringBuffer *sb)
 
 static void editorDrawWelcome(StringBuffer *sb)
 {
-    const char *TITLE = "PICO editor";
+    const char *TITLE = "ATTO editor";
     centerText(sb, TITLE, strlen(TITLE));
     sbAppend(sb, "\r\n", 2);
 
     char version[40] = "version ";
-    strcat(version, PICO_VERSION);
+    strcat(version, ATTO_VERSION);
     centerText(sb, version, strlen(version));
 }
 
