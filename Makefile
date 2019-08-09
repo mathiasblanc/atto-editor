@@ -1,2 +1,2 @@
-pico: pico.c
-	$(CC) pico.c stringbuffer.c terminal.c -o pico -Wall -Wextra -pedantic -std=c99
+pico: atto.c
+	$(CC) atto.c stringbuffer.c terminal.c -o atto -Wall -Wextra -pedantic -std=c99
