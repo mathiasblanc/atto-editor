@@ -12,6 +12,7 @@
 #include <time.h>
 #include <stdarg.h>
 #include <fcntl.h>
+#include <ctype.h>
 
 #include "stringbuffer.h"
 #include "terminal.h"
@@ -97,6 +98,7 @@ static void editorFreeRow(TextRow *row);
 static void editorDelRow(const int at);
 static void editorAppendStringToRow(const char *s, const size_t len, TextRow *row);
 static void editorInsertNewLine();
+static char *editorPrompt(const char *prompt);
 
 static void die(const char *message)
 {
@@ -549,7 +551,15 @@ static char *editorRowsToString(int *bufferLen)
 static void editorSave()
 {
     if (document.filename == NULL)
-        return;
+    {
+        document.filename = editorPrompt("Save as : %s");
+
+        if (document.filename == NULL)
+        {
+            editorSetStatusMessage("Save aborted!");
+            return;
+        }
+    }
 
     int len;
     char *buffer = editorRowsToString(&len);
@@ -731,7 +741,7 @@ static void editorProcessKeyPress()
     case CTRL_KEY('q'):
         if (document.dirty && quitTimes > 0)
         {
-            editorSetStatusMessage("\x1b[1;5mWARNING\x1b[m File has unsaved changes. "
+            editorSetStatusMessage("\x1b[1;5m(!)\x1b[m File has unsaved changes. "
                                    "Press Ctrl+Q %d more times to quit.",
                                    quitTimes);
             quitTimes--;
@@ -770,6 +780,55 @@ static void editorProcessKeyPress()
     }
 
     quitTimes = QUIT_TIMES;
+}
+
+static char *editorPrompt(const char *prompt)
+{
+    size_t bufferSize = 128;
+    char *buffer = malloc(bufferSize);
+    buffer[0] = '\0';
+
+    size_t bufferLen = 0;
+
+    while (1)
+    {
+        editorSetStatusMessage(prompt, buffer);
+        editorRefreshScreen();
+
+        const int c = editorReadKey();
+
+        if (c == ESC_CHAR)
+        {
+            editorSetStatusMessage("");
+            free(buffer);
+
+            return NULL;
+        }
+        else if (c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE)
+        {
+            if (bufferLen != 0)
+                buffer[--bufferLen] = '\0';
+        }
+        else if (c == '\r')
+        {
+            if (bufferLen != 0)
+            {
+                editorSetStatusMessage("");
+                return buffer;
+            }
+        }
+        else if (!iscntrl(c) && c < 128)
+        {
+            if (bufferLen == bufferSize - 1)
+            {
+                bufferSize *= 2;
+                buffer = realloc(buffer, bufferSize);
+            }
+
+            buffer[bufferLen++] = c;
+            buffer[bufferLen] = '\0';
+        }
+    }
 }
 
 int main(int argc, char *argv[])
