@@ -22,6 +22,7 @@
 #define ESC_CHAR '\x1b'
 #define CTRL_KEY(k) ((k)&0x1f)
 #define TAB_STOP 8
+#define QUIT_TIMES 2
 
 enum EditorKey
 {
@@ -52,6 +53,7 @@ typedef struct Document
     int rowOffset;
     int colOffset;
     char *filename;
+    int dirty;
 } Document;
 
 typedef struct EditorConfig
@@ -89,6 +91,11 @@ static void editorInsertCharAtRow(const char c, int at, TextRow *row);
 static void editorInsertChar(const char c);
 static char *editorRowsToString(int *bufferLen);
 static void editorSave();
+static void editorDelCharAtRow(const int at, TextRow *row);
+static void editorDelChar();
+static void editorFreeRow(TextRow *row);
+static void editorDelRow(const int at);
+static void editorAppendStringToRow(const char *s, const size_t len, TextRow *row);
 
 static void die(const char *message)
 {
@@ -149,8 +156,10 @@ static void editorDrawStatusBar(StringBuffer *sb)
     sbAppend(sb, "\x1b[7m", 4);
 
     char status[80];
-    int len = snprintf(status, sizeof(status), "%.20s - %d lines",
-                       document.filename ? document.filename : "[NO NAME]", document.rowsCount);
+    int len = snprintf(status, sizeof(status), "%.20s - %d lines %s",
+                       document.filename ? document.filename : "[NO NAME]",
+                       document.rowsCount,
+                       document.dirty ? "(modified)" : "");
 
     char rStatus[80];
     int rLen = snprintf(rStatus, sizeof(rStatus), "%d/%d", config.cursorY + 1, document.rowsCount);
@@ -208,6 +217,7 @@ static void initEditor()
     document.rowOffset = 0;
     document.colOffset = 0;
     document.filename = NULL;
+    document.dirty = 0;
 }
 
 static int editorReadKey()
@@ -364,6 +374,74 @@ static void editorInsertCharAtRow(const char c, int at, TextRow *row)
     row->text[at] = c;
 
     editorUpdateRow(row);
+    document.dirty++;
+}
+
+static void editorDelCharAtRow(const int at, TextRow *row)
+{
+    if (at < 0 || at > row->len)
+        return;
+
+    memmove(&row->text[at], &row->text[at + 1], row->len - at);
+    row->len--;
+
+    editorUpdateRow(row);
+    document.dirty++;
+}
+
+static void editorDelChar()
+{
+    if (config.cursorY == document.rowsCount)
+        return;
+
+    if (config.cursorX == 0 && config.cursorY == 0)
+        return;
+
+    TextRow *row = &document.rows[config.cursorY];
+
+    if (config.cursorX > 0)
+    {
+        editorDelCharAtRow(config.cursorX, row);
+        config.cursorX--;
+    }
+    else
+    {
+        config.cursorX = document.rows[config.cursorY - 1].len;
+        editorAppendStringToRow(row->text, row->len, &document.rows[config.cursorY - 1]);
+        editorDelRow(config.cursorY);
+        config.cursorY--;
+    }
+}
+
+static void editorFreeRow(TextRow *row)
+{
+    free(row->render);
+    free(row->text);
+}
+
+static void editorDelRow(const int at)
+{
+    if (at < 0 || at > document.rowsCount)
+        return;
+
+    editorFreeRow(&document.rows[at]);
+    memmove(&document.rows[at],
+            &document.rows[at + 1],
+            sizeof(TextRow) * (document.rowsCount - at + 1));
+
+    document.rowsCount--;
+    document.dirty++;
+}
+
+static void editorAppendStringToRow(const char *s, const size_t len, TextRow *row)
+{
+    row->text = realloc(row->text, row->len + len + 1);
+    memcpy(&row->text[row->len], s, len);
+    row->len += len;
+    row->text[row->len] = '\0';
+
+    editorUpdateRow(row);
+    document.dirty++;
 }
 
 static void editorUpdateRow(TextRow *row)
@@ -413,6 +491,7 @@ static void editorAppendRow(const char *s, size_t len)
     editorUpdateRow(&document.rows[at]);
 
     document.rowsCount++;
+    document.dirty++;
 }
 
 // caller is responsible for freeing the returned buffer
@@ -461,7 +540,10 @@ static void editorSave()
             {
                 close(fd);
                 free(buffer);
+
+                document.dirty = 0;
                 editorSetStatusMessage("%d bytes written to disk", len);
+
                 return;
             }
         }
@@ -497,6 +579,7 @@ static void editorOpen(const char *filename)
 
     free(line);
     fclose(fp);
+    document.dirty = 0;
 }
 
 static void editorDrawRows(StringBuffer *sb)
@@ -614,6 +697,7 @@ static void editorMoveCursor(int key)
 static void editorProcessKeyPress()
 {
     int c = editorReadKey();
+    static int quitTimes = QUIT_TIMES;
 
     switch (c)
     {
@@ -621,13 +705,24 @@ static void editorProcessKeyPress()
         // TODO
         break;
     case CTRL_KEY('q'):
+        if (document.dirty && quitTimes > 0)
+        {
+            editorSetStatusMessage("WARNING!!! File has unsaved changes. "
+                                   "Press Ctrl+Q %d more times to quit.",
+                                   quitTimes);
+            quitTimes--;
+            return;
+        }
+
         clearScreeen();
         exit(0);
         break;
     case BACKSPACE:
     case CTRL_KEY('h'):
     case DEL_KEY:
-        // TODO
+        if (c == DEL_KEY)
+            editorMoveCursor(ARROW_RIGHT);
+        editorDelChar();
         break;
     case CTRL_KEY('s'):
         editorSave();
@@ -649,6 +744,8 @@ static void editorProcessKeyPress()
         editorInsertChar(c);
         break;
     }
+
+    quitTimes = QUIT_TIMES;
 }
 
 int main(int argc, char *argv[])
