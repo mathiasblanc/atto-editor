@@ -1,21 +1,21 @@
 {
-    "tasks": [
-        {
-            "type": "shell",
-            "label": "gcc build active file",
-            "command": "/usr/bin/gcc",
-            "args": [
-                "-g",
-                "/home/mathias/dev/projects/pico-editor/pico.c",
-                "/home/mathias/dev/projects/pico-editor/terminal.c",
-                "/home/mathias/dev/projects/pico-editor/stringbuffer.c",
-                "-o",
-                "${fileDirname}/${fileBasenameNoExtension}"
-            ],
-            "options": {
-                "cwd": "/usr/bin"
-            }
-        }
-    ],
-    "version": "2.0.0"
+  "tasks": [
+    {
+      "type": "shell",
+      "label": "gcc build active file",
+      "command": "/usr/bin/gcc",
+      "args": [
+        "-g",
+        "/home/mathias/dev/projects/atto-editor/atto.c",
+        "/home/mathias/dev/projects/atto-editor/terminal.c",
+        "/home/mathias/dev/projects/atto-editor/stringbuffer.c",
+        "-o",
+        "${fileDirname}/${fileBasenameNoExtension}"
+      ],
+      "options": {
+        "cwd": "/usr/bin"
+      }
+    }
+  ],
+  "version": "2.0.0"
 }
