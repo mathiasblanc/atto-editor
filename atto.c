@@ -85,6 +85,7 @@ static void editorOpen(const char *filename);
 static void editorInsertRow(const int at, const char *s, size_t len);
 static void editorScroll();
 static int editorCursorXToCursorRenderX(const TextRow *row, int cursorX);
+static int editorCursorRenderXToCursorX(const TextRow *row, int cursorRenderX);
 static void editorDrawStatusBar(StringBuffer *sb);
 static void editorDrawMessageBar(StringBuffer *sb);
 static void editorSetStatusMessage(const char *fmt, ...);
@@ -98,7 +99,9 @@ static void editorFreeRow(TextRow *row);
 static void editorDelRow(const int at);
 static void editorAppendStringToRow(const char *s, const size_t len, TextRow *row);
 static void editorInsertNewLine();
-static char *editorPrompt(const char *prompt);
+static char *editorPrompt(const char *prompt, void (*callback)(char *, int));
+static void editorFind();
+static void editorFindCallBack(char *query, int key);
 
 static void die(const char *message)
 {
@@ -345,6 +348,26 @@ static int editorCursorXToCursorRenderX(const TextRow *row, int cursorX)
     return cursorRenderX;
 }
 
+static int editorCursorRenderXToCursorX(const TextRow *row, int cursorRenderX)
+{
+    int currentCursorRenderX = 0;
+
+    int cursorX;
+
+    for (cursorX = 0; cursorX < row->len; cursorX++)
+    {
+        if (row->text[cursorX] == '\t')
+            currentCursorRenderX += (TAB_STOP - 1) - (currentCursorRenderX % TAB_STOP);
+
+        currentCursorRenderX++;
+
+        if (currentCursorRenderX > cursorRenderX)
+            return cursorX;
+    }
+
+    return cursorX;
+}
+
 static void editorRefreshScreen()
 {
     editorScroll();
@@ -552,7 +575,7 @@ static void editorSave()
 {
     if (document.filename == NULL)
     {
-        document.filename = editorPrompt("Save as : %s (ESC to cancel)");
+        document.filename = editorPrompt("Save as : %s (ESC to cancel)", NULL);
 
         if (document.filename == NULL)
         {
@@ -751,6 +774,9 @@ static void editorProcessKeyPress()
         clearScreeen();
         exit(0);
         break;
+    case CTRL_KEY('f'):
+        editorFind();
+        break;
     case BACKSPACE:
     case CTRL_KEY('h'):
     case DEL_KEY:
@@ -782,7 +808,7 @@ static void editorProcessKeyPress()
     quitTimes = QUIT_TIMES;
 }
 
-static char *editorPrompt(const char *prompt)
+static char *editorPrompt(const char *prompt, void (*callback)(char *, int))
 {
     size_t bufferSize = 128;
     char *buffer = malloc(bufferSize);
@@ -800,6 +826,10 @@ static char *editorPrompt(const char *prompt)
         if (c == ESC_CHAR)
         {
             editorSetStatusMessage("");
+
+            if (callback)
+                callback(buffer, c);
+
             free(buffer);
 
             return NULL;
@@ -814,6 +844,10 @@ static char *editorPrompt(const char *prompt)
             if (bufferLen != 0)
             {
                 editorSetStatusMessage("");
+
+                if (callback)
+                    callback(buffer, c);
+
                 return buffer;
             }
         }
@@ -828,6 +862,84 @@ static char *editorPrompt(const char *prompt)
             buffer[bufferLen++] = c;
             buffer[bufferLen] = '\0';
         }
+
+        if (callback)
+            callback(buffer, c);
+    }
+}
+
+static void editorFindCallBack(char *query, int key)
+{
+    static int lastMatch = -1;
+    static int direction = 1; //down = 1, up = -1
+
+    if (key == '\r' || key == ESC_CHAR)
+    {
+        lastMatch = -1;
+        direction = 1;
+        return;
+    }
+    else if (key == ARROW_RIGHT || key == ARROW_DOWN)
+    {
+        direction = 1;
+    }
+    else if (key == ARROW_LEFT || key == ARROW_UP)
+    {
+        direction = -1;
+    }
+    else
+    {
+        lastMatch = -1;
+        direction = -1;
+    }
+
+    if (lastMatch == -1)
+        direction = 1;
+
+    int current = lastMatch;
+
+    for (int i = 0; i < document.rowsCount; i++)
+    {
+        current += direction;
+
+        if (current == -1)
+            current = document.rowsCount - 1;
+        else if (current == document.rowsCount)
+            current = 0;
+
+        const TextRow *ROW = &document.rows[current];
+        const char *const MATCH = strstr(ROW->text, query);
+
+        if (MATCH)
+        {
+            lastMatch = current;
+            config.cursorX = editorCursorRenderXToCursorX(ROW, MATCH - ROW->render);
+            config.cursorY = current;
+            document.rowOffset = document.rowsCount;
+            break;
+        }
+    }
+}
+
+static void editorFind()
+{
+    int oldCx = config.cursorX;
+    int oldCy = config.cursorY;
+    int oldRowOffset = document.rowOffset;
+    int oldColOffset = document.colOffset;
+
+    char *query = editorPrompt("Search : %s (ESC to cancel)", editorFindCallBack);
+
+    if (query)
+    {
+        free(query);
+    }
+    else
+    {
+        config.cursorX = oldCx;
+        config.cursorY = oldCy;
+        document.rowOffset = oldRowOffset;
+        document.colOffset = oldColOffset;
     }
 }
 
@@ -842,7 +954,7 @@ int main(int argc, char *argv[])
     if (argc >= 2)
         editorOpen(argv[1]);
 
-    editorSetStatusMessage("HELP : Ctrl+S = save | Ctrl+Q = quit");
+    editorSetStatusMessage("HELP : Ctrl+S = save | Ctrl+F = find | Ctrl+Q = quit");
 
     while (1)
     {
